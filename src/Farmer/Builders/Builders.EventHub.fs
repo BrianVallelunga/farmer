@@ -4,6 +4,7 @@ module Farmer.Builders.EventHub
 open Farmer
 open Farmer.EventHub
 open Farmer.Arm.EventHub
+open Farmer.Arm.RoleAssignment
 open Farmer.Arm.Storage
 open Namespaces
 open EventHubs
@@ -24,6 +25,7 @@ type EventHubConfig =
         ConsumerGroups: ResourceName Set
         CaptureDestination: CaptureDestination option
         AuthorizationRules: Map<ResourceName, AuthorizationRuleRight Set>
+        RoleAssignments: Roles.RoleAssignment Set
         Dependencies: ResourceId Set
         Tags: Map<string, string>
     }
@@ -72,6 +74,27 @@ type EventHubConfig =
                         Tags = this.Tags
                     }
                 | _ -> ()
+
+                for roleAssignment in this.RoleAssignments do
+                    let uniqueName =
+                        $"{this.EventHubNamespaceName.Value}{roleAssignment.Principal.ArmExpression.Value}{roleAssignment.Role.Id}"
+                        |> DeterministicGuid.create
+                        |> string
+                        |> ResourceName
+
+                    {
+                        Name = uniqueName
+                        RoleDefinitionId = roleAssignment.Role
+                        PrincipalId = roleAssignment.Principal
+                        PrincipalType = PrincipalType.ServicePrincipal
+                        Scope = SpecificResource (namespaces.resourceId this.EventHubNamespaceName)
+                        Dependencies =
+                            Set
+                                [
+                                    ResourceId.create (namespaces, this.EventHubNamespaceName)
+                                    yield! roleAssignment.Owner |> Option.toList
+                                ]
+                    }
 
                 // Event hub
                 {
@@ -134,6 +157,7 @@ type EventHubBuilder() =
             CaptureDestination = None
             ConsumerGroups = Set.empty
             AuthorizationRules = Map.empty
+            RoleAssignments = Set.empty
             Dependencies = Set.empty
             Tags = Map.empty
         }
@@ -216,6 +240,42 @@ type EventHubBuilder() =
 
     member this.CaptureToStorage(state: EventHubConfig, storageAccount: StorageAccountConfig, container) =
         this.CaptureToStorage(state, storageAccount.Name.ResourceName, container)
+
+    static member private GrantAccess(state: EventHubConfig, assignment) =
+        { state with
+            RoleAssignments = state.RoleAssignments.Add assignment
+        }
+
+    [<CustomOperation "grant_access">]
+    member _.GrantAccess(state: EventHubConfig, principalId: PrincipalId, role) =
+        EventHubBuilder.GrantAccess(
+            state,
+            {
+                Principal = principalId
+                Role = role
+                Owner = None
+            }
+        )
+
+    member _.GrantAccess(state: EventHubConfig, identity: UserAssignedIdentityConfig, role) =
+        EventHubBuilder.GrantAccess(
+            state,
+            {
+                Principal = identity.PrincipalId
+                Role = role
+                Owner = Some identity.ResourceId
+            }
+        )
+
+    member _.GrantAccess(state: EventHubConfig, identity: Identity.SystemIdentity, role) =
+        EventHubBuilder.GrantAccess(
+            state,
+            {
+                Principal = identity.PrincipalId
+                Role = role
+                Owner = Some identity.ResourceId
+            }
+        )
 
     interface IDependable<EventHubConfig> with
         member _.Add state newDeps =
